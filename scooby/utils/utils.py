@@ -440,6 +440,11 @@ def get_outputs(csb, seqs, gene_slice, region_slice, predict, model_type, conv_w
         outputs = outputs.float().detach()
         outputs_rna = outputs
         return outputs_rna, None
+    elif model_type == "count":
+        outputs = predict(csb, seqs, conv_weight, conv_bias, bins_to_predict=gene_slice)
+        outputs = outputs.float().detach()
+        outputs_rna = outputs
+        return outputs_rna, None
 
 
 def get_pseudobulk_count_pred(
@@ -522,8 +527,8 @@ def get_cell_count_pred(
     Returns:
         Dict[str, torch.Tensor]: A dictionary containing the predicted RNA and ATAC counts.
     """
-    assert model_type in ["multiome", "multiome_rna", "multiome_atac", "rna"], "Invalid model_type"
-    if model_type in ["multiome_rna", "rna"]:
+    assert model_type in ["multiome", "multiome_rna", "multiome_atac", "rna", "count"], "Invalid model_type"
+    if model_type in ["multiome_rna", "rna", "count"]:
         assert region_slice is None, "region_slice should be None for rna models"
     if model_type in ["multiome_atac"]:
         assert gene_slice is None, "gene_slice should be None for atac models"
@@ -539,7 +544,7 @@ def get_cell_count_pred(
             csb, seqs, gene_slice, region_slice, predict, model_type, conv_weight, conv_bias
         )
 
-        if model_type in ["multiome_rna", "rna"]:
+        if model_type in ["multiome_rna", "rna", "count"]:
             stacked_outputs_rna.append(process_rna(outputs_rna, strand, clip_soft, num_neighbors))
         elif model_type in ["multiome_atac"]:
             stacked_outputs_atac.extend(
@@ -568,6 +573,9 @@ def get_cell_count_pred(
                     [process_atac(outputs_atac_i, num_neighbors).sum(axis=0) for outputs_atac_i in outputs_atac], axis=1
                 )
             )
+        elif model_type in ["count"]:
+            return {"rna": outputs_rna,
+                    "atac": None}
         else:
             stacked_outputs_rna.append(process_rna(outputs_rna, strand, clip_soft, num_neighbors))
             stacked_outputs_atac.extend(
