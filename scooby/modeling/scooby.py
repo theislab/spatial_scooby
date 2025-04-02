@@ -189,7 +189,7 @@ class Scooby(Borzoi):
         out = F.softplus(out)
         return out.permute(0,2,1)
         
-    def forward(self, sequence, cell_emb, gene_slices = None):
+    def forward(self, sequence, dissociated_emb, spatial_emb, gene_slices = None):
         """
         Forward pass of the scooby model.
 
@@ -200,6 +200,10 @@ class Scooby(Borzoi):
         Returns:
             Tensor: Predicted profiles for each cell (batch_size, num_cells, seq_len, n_tracks).
         """
+        if spatial_emb is not None:
+            cell_emb = torch.cat([dissociated_emb, spatial_emb], dim=1)
+        else:
+            cell_emb = dissociated_emb
         cell_emb_conv_weights,cell_emb_conv_biases = self.forward_cell_embs_only(cell_emb)
         out = self.forward_sequence_w_convs(sequence, cell_emb_conv_weights, cell_emb_conv_biases, bins_to_predict = gene_slices.tolist())
         if self.count_only:

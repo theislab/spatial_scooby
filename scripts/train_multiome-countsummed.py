@@ -13,7 +13,7 @@ from enformer_pytorch.data import GenomeIntervalDataset
 
 from scooby.modeling import Scooby
 from scooby.utils.utils import poisson_torch, evaluate, fix_rev_comp_rna, read_backed, add_weight_decay, get_lora
-from scooby.data import onTheFlyCountDataset
+from scooby.data import onTheFlySpatialCountDataset
 from borzoi_pytorch.config_borzoi import BorzoiConfig
 import scanpy as sc
 import h5py
@@ -36,12 +36,15 @@ def train(config):
     run_name = config["run_name"]
     
     adata_path = config["data"]["adata_path"]
-    embedding_path = config["data"]["embedding_path"]
+    dissociated_embedding_key = config["data"]["dissociated_embedding_key"]
+    spatial_embedding_key = config["data"]["spatial_embedding_key"]
     neighbors_path = config["data"]["neighbors_path"]
     sequences_path = config["data"]["sequences_path"]
     genome_path = config["data"]["genome_path"]
     
     cell_emb_dim = config["model"]["cell_emb_dim"]
+    niche_emb_dim = config["model"]["niche_emb_dim"]
+    
     num_tracks = config["model"]["num_tracks"]
     batch_size = config["training"]["batch_size"]
     lr = float(config["training"]["lr"])
@@ -56,6 +59,7 @@ def train(config):
     context_length = config["data"]["context_length"]
     shift_augs = config["data"]["shift_augs"]
     rc_aug = config["data"]["rc_aug"]
+    pretrained_model = config["model"]["pretrained_model"]
 
     device = accelerator.device
 
@@ -63,22 +67,19 @@ def train(config):
     adata = sc.read(adata_path)
 
     # we have an option to train with targets pseudobulked across neighbors, but we train without neighbors, true single cell
-    neighbors = scipy.sparse.load_npz(neighbors_path)
-    embedding = pd.read_parquet(embedding_path)
-
-    # cell weights can be used to put more weight on some cells or just ignore some cell types altogether
-    # cell_weights = np.load(f"{data_path}scooby_training_data/cell_weights_no_normoblast.npy")
+    if neighbors_path is not None:
+        neighbors = scipy.sparse.load_npz(neighbors_path)
 
     # Calculate training steps
     num_steps = (45_000 * num_epochs) // (batch_size)
     accelerator.print("Will be training for ", num_steps)
 
-    config = BorzoiConfig.from_pretrained("johahi/flashzoi-replicate-0")
+    config = BorzoiConfig.from_pretrained(pretrained_model)
     # config.count_mode = "TSS"
 
     # Initialize model, optimizer, and scheduler
     scooby = Scooby.from_pretrained(
-        'johahi/flashzoi-replicate-0',
+        pretrained_model,
         config = config,
         cell_emb_dim=cell_emb_dim,
         embedding_dim=1920,
@@ -97,7 +98,7 @@ def train(config):
     scheduler = SequentialLR(optimizer, [warmup_scheduler, train_scheduler], [warmup_steps])
 
     # Create datasets and dataloaders
-    filter_train = lambda df: df.filter((pl.col("column_6") == f"train") & (pl.col('column_2') >=0)) 
+    filter_train = lambda df: df.filter(((pl.col("column_4") != f"fold3") | (pl.col("column_4") != f"fold4")) & (pl.col('column_2') >=0)) 
     ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -110,7 +111,7 @@ def train(config):
         chr_bed_to_fasta_map={},
     )
 
-    filter_val = lambda df: df.filter((pl.col("column_6") == f"val") & (pl.col('column_2') >=0)) 
+    filter_val = lambda df: df.filter((pl.col("column_4") == f"fold3") & (pl.col('column_2') >=0)) 
     val_ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -125,25 +126,27 @@ def train(config):
 
     accelerator.print(len(val_ds), val_fold, test_fold)
 
-    otf_dataset =onTheFlyCountDataset(
+    otf_dataset =onTheFlySpatialCountDataset(
         adata,
-        embedding,
+        dissociated_embedding_key,
+        spatial_embedding_key,
         ds,
         get_targets= True,
         random_cells = True,
         cells_to_run = None, 
         cell_sample_size = 1024,
-        gtf_file = '/data/ceph/hdd/project/node_08/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz'
+        gtf_file = '/s/project/QNA/seq2space/laika_training_data/gencode.vM25.annotation.gtf.gz'
     )
-    val_dataset =onTheFlyCountDataset(
+    val_dataset =onTheFlySpatialCountDataset(
         adata,
-        embedding,
+        dissociated_embedding_key,
+        spatial_embedding_key,
         val_ds,
         get_targets= True,
         random_cells = True,
         cell_sample_size = 1024,
         cells_to_run = None, 
-        gtf_file = '/data/ceph/hdd/project/node_08/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz'
+        gtf_file = '/s/project/QNA/seq2space/laika_training_data/gencode.vM25.annotation.gtf.gz'
     )
 
     training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
@@ -156,21 +159,17 @@ def train(config):
     )
 
     # Initialize trackers
-    accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
+    accelerator.init_trackers("spatial_scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
     loss_fn = poisson_torch
 
     # Training loop
     for epoch in range(num_epochs):
-        for i, [inputs, rc_augs, targets, cell_emb_idx, gene_slices] in tqdm.tqdm(enumerate(training_loader)):
+        for i, [inputs, rc_augs, targets, dissociated_emb_idx, spatial_emb_idx, gene_slices] in tqdm.tqdm(enumerate(training_loader)):
             inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
-            # for rc_aug_idx in rc_augs.nonzero():
-            #     rc_aug_idx = rc_aug_idx[0]
-            #     flipped_version = torch.flip(targets[rc_aug_idx].unsqueeze(0), (1, -3))
-            #     targets[rc_aug_idx] = fix_rev_comp_rna(flipped_version)[0]
             optimizer.zero_grad()
             with torch.autocast("cuda"):
-                outputs = scooby(inputs, cell_emb_idx, gene_slices[0])
+                outputs = scooby(inputs, dissociated_emb_idx, spatial_emb_idx, gene_slices[0])
                 loss = loss_fn(outputs.squeeze(-1), targets.squeeze(-1), total_weight=total_weight)
                 accelerator.log({"loss": loss})
             accelerator.backward(loss)
@@ -183,13 +182,13 @@ def train(config):
                 scooby.train()
             if (i % 1000 == 0 and epoch != 0) or (i % 2000 == 0 and epoch == 0 and i != 0):
                 if accelerator.is_main_process:
-                    accelerator.save_state(output_dir=f"{output_dir}/scooby_epoch_{epoch}_{i}_{run_name}")
-    accelerator.save_state(output_dir=f"{output_dir}/scooby_final_{run_name}")
+                    accelerator.save_state(output_dir=f"{output_dir}/spatial_scooby_epoch_{epoch}_{i}_{run_name}")
+    accelerator.save_state(output_dir=f"{output_dir}/spatial_scooby_final_{run_name}")
     accelerator.end_training()
 
 if __name__ == "__main__":
     # Load configuration from YAML file
-    with open("config_count.yaml", "r") as f:
+    with open("config_spatial.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     # Train the model
