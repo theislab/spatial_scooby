@@ -380,6 +380,24 @@ def process_rna(outputs, strand, clip_soft, num_neighbors):
         return undo_squashed_scale(outputs[0, :, 1:num_pos:2], clip_soft=clip_soft) * (1 / num_neighbors)
 
 
+
+def process_count(outputs, num_neighbors=1):
+    """
+    Processes the count output of the model.
+
+    This function applies exp(x) - 1 and normalization to the RNA output.
+
+    Args:
+        outputs (torch.Tensor): The RNA output of the model.
+        num_neighbors (int): The number of neighbors.
+
+    Returns:
+        torch.Tensor: The raw count output.
+    """
+    return (torch.exp(outputs) - 1) * (1 / num_neighbors)
+
+
+
 def process_atac(outputs, num_neighbors):
     """
     Processes the ATAC output of the model.
@@ -448,7 +466,7 @@ def get_outputs(csb, seqs, gene_slice, region_slice, predict, model_type, conv_w
 
 
 def get_pseudobulk_count_pred(
-    csb, seqs, cell_emb_conv_weights_and_biases, gene_slice, strand, predict, clip_soft, model_type, num_neighbors=1, chunk_size=70_000):
+    csb, seqs, cell_emb_conv_weights_and_biases, gene_slice, strand, predict, clip_soft, model_type, num_neighbors=1, chunk_size=70_000, process_counts=True):
     """
     Calculates the predicted pseudobulk count for a given gene.
 
@@ -477,12 +495,20 @@ def get_pseudobulk_count_pred(
         for chunked_conv_weight, chunked_conv_bias in zip(torch.split(conv_weight, split_size_or_sections=chunk_size, dim=1), torch.split(conv_bias, split_size_or_sections=chunk_size, dim=1)):
             # get predictions for all cells of one cell type
             outputs = predict(csb, seqs, seqs_rev_comp, chunked_conv_weight, chunked_conv_bias, bins_to_predict=gene_slice)
+            
             # get RNA:
-            if "multiome" in model_type:
-                outputs = outputs[:, :, torch.tensor([1, 1, 0]).repeat(outputs.shape[2] // 3).bool()]
-            outputs = outputs.float().detach()
-            #print (process_rna(outputs, strand, clip_soft, num_neighbors).shape)
-            tmp_outputs.append(process_rna(outputs, strand, clip_soft, num_neighbors).sum())
+            if "count" in model_type:
+                outputs = outputs.float().detach()
+                if process_counts:
+                    tmp_outputs.append(process_count(outputs).sum())
+                else:
+                    tmp_outputs.append(outputs.sum())
+            else:
+                if "multiome" in model_type:
+                    outputs = outputs[:, :, torch.tensor([1, 1, 0]).repeat(outputs.shape[2] // 3).bool()]
+                outputs = outputs.float().detach()
+                #print (process_rna(outputs, strand, clip_soft, num_neighbors).shape)
+                tmp_outputs.append(process_rna(outputs, strand, clip_soft, num_neighbors).sum())
         stacked_outputs.append(torch.vstack(tmp_outputs).sum())
             #print (stacked_outputs[-1].shape)
     return torch.stack(stacked_outputs, dim = 0)
@@ -559,7 +585,7 @@ def get_cell_count_pred(
             "rna": (torch.hstack(stacked_outputs_rna).sum(0).cpu() if len(stacked_outputs_rna) > 0 else None),
             "atac": (torch.stack(stacked_outputs_atac, axis=1).cpu() if len(stacked_outputs_atac) > 0 else None),
         }
-
+    print(embeddings.shape)
     for embedding in torch.split(embeddings, split_size_or_sections=chunk_size, dim=0):
         conv_weight, conv_bias = csb.forward_cell_embs_only(embedding.unsqueeze(0))
         outputs_rna, outputs_atac = get_outputs(
@@ -574,8 +600,7 @@ def get_cell_count_pred(
                 )
             )
         elif model_type in ["count"]:
-            return {"rna": outputs_rna,
-                    "atac": None}
+            stacked_outputs_rna.append(outputs_rna)
         else:
             stacked_outputs_rna.append(process_rna(outputs_rna, strand, clip_soft, num_neighbors))
             stacked_outputs_atac.extend(
