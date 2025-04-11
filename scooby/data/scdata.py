@@ -736,3 +736,86 @@ class onTheFlyCountDataset(Dataset):
             targets = torch.from_numpy(self.adata_count[idx_cells, gene].X.A).permute(1,0).unsqueeze(1)
             return inputs, rc_augs, targets, embeddings, gene_slices
         return inputs, rc_augs, embeddings, gene_slices
+
+
+
+class onTheFlySpatialCountDataset(Dataset):
+    def __init__(
+        self,
+        adata_count,
+        dissociated_emb_key,
+        spatial_emb_key,
+        ds,
+        cell_sample_size=32,
+        get_targets=True,
+        random_cells=True,
+        cells_to_run=None,
+        cell_weights=None,
+        gtf_file=None,
+        layer=None,
+        use_geneid=True, 
+        tss_only=True
+    ):
+        """
+        """
+        self.cells_to_run = cells_to_run
+        self.get_targets = get_targets
+        self.random_cells = random_cells
+        if not self.random_cells and not cells_to_run:
+            # we are probably just providing seqs?
+            self.cells_to_run = np.zeros(1, dtype=np.int64)
+        self.genome_ds = ds
+        self.cell_sample_size = cell_sample_size
+        self.cell_weights = cell_weights
+        self.adata_count = adata_count
+        self.transcriptome = Transcriptome(gtf_file, use_geneid=use_geneid)
+        self.spatial_emb_key = spatial_emb_key
+        self.dissociated_emb_key = dissociated_emb_key
+        self.layer = layer
+        self.tss_only = tss_only
+    
+    def _reinit_fasta_reader(self):
+        """
+        Re-initializes the FastaInterval reader.
+
+        This is necessary because pyfaidx and torch multiprocessing can have compatibility issues.
+        """
+        self.genome_ds.fasta = FastaInterval(
+            fasta_file=self.genome_ds.fasta.seqs.filename,
+            context_length=self.genome_ds.fasta.context_length,
+            return_seq_indices=self.genome_ds.fasta.return_seq_indices,
+            shift_augs=self.genome_ds.fasta.shift_augs,
+            rc_aug=self.genome_ds.fasta.rc_aug,
+        )
+
+    def __len__(self):
+        return len(self.genome_ds)
+
+    def __getitem__(self, idx):
+        self._reinit_fasta_reader()
+        if self.random_cells:
+            idx_cells = np.random.choice(self.adata_count.obsm[self.dissociated_emb_key].shape[0], size=self.cell_sample_size, p=self.cell_weights)
+        else:
+            idx_cells = self.cells_to_run
+        idx_gene = idx
+        seq_coord = self.genome_ds.df[idx_gene]
+        inputs, _, rc_augs = self.genome_ds[idx_gene]
+
+        gene = seq_coord["column_4"].item()
+        if self.tss_only:
+            gene_slices = [3071, 3072]
+        else:
+            gene_slices, _ = get_gene_slice_and_strand(self.transcriptome, gene, seq_coord['column_2'].item(), span = True)
+        embeddings_dissociated = torch.from_numpy(self.adata_count.obsm[self.dissociated_emb_key][idx_cells, :])
+        if self.spatial_emb_key is not None:
+            embeddings_spatial = torch.from_numpy(self.adata_count.obsm[self.spatial_emb_key][idx_cells, :])
+        else:
+            embeddings_spatial = torch.empty(size=(1,))
+        if self.get_targets:
+            if self.layer is not None:
+                targets = torch.from_numpy(self.adata_count.layers[self.layer][idx_cells, gene]).permute(1,0).unsqueeze(1)
+            else:
+                targets = torch.from_numpy(self.adata_count[idx_cells, gene].X.A).permute(1,0).unsqueeze(1)
+            return inputs, rc_augs, targets, embeddings_dissociated, embeddings_spatial, gene_slices
+
+        return inputs, rc_augs, embeddings_dissociated, embeddings_spatial, gene_slices

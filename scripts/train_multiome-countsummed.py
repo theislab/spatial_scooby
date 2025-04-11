@@ -81,7 +81,7 @@ def train(config):
     scooby = Scooby.from_pretrained(
         pretrained_model,
         config = config,
-        cell_emb_dim=cell_emb_dim,
+        cell_emb_dim=cell_emb_dim + niche_emb_dim,
         embedding_dim=1920,
         n_tracks=num_tracks,
         return_center_bins_only=True,
@@ -98,7 +98,7 @@ def train(config):
     scheduler = SequentialLR(optimizer, [warmup_scheduler, train_scheduler], [warmup_steps])
 
     # Create datasets and dataloaders
-    filter_train = lambda df: df.filter(((pl.col("column_4") != f"fold3") | (pl.col("column_4") != f"fold4")) & (pl.col('column_2') >=0)) 
+    filter_train = lambda df: df.filter(((pl.col("column_6") != f"fold3") | (pl.col("column_6") != f"fold4")) & (pl.col('column_2') >=0) & (pl.col('column_4').is_in(adata.var_names))) 
     ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -111,7 +111,7 @@ def train(config):
         chr_bed_to_fasta_map={},
     )
 
-    filter_val = lambda df: df.filter((pl.col("column_4") == f"fold3") & (pl.col('column_2') >=0)) 
+    filter_val = lambda df: df.filter((pl.col("column_6") == f"fold3") & (pl.col('column_2') >=0) & (pl.col('column_4').is_in(adata.var_names))) 
     val_ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -149,7 +149,7 @@ def train(config):
         gtf_file = '/s/project/QNA/seq2space/laika_training_data/gencode.vM25.annotation.gtf.gz'
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last = True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training

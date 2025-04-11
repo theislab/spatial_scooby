@@ -1,0 +1,32 @@
+output_dir: "/s/project/QNA/seq2space/tmp/"
+run_name: "spatial_scooby_run"
+
+data:
+  adata_path: "/s/project/QNA/seq2space/data/Xenium_Mouse_Brain_Processed_borz.h5ad"
+  dissociated_embedding_key: "X_pca_train" #"X_banksy_0.2" 
+  spatial_embedding_key: null #"X_banksy_0.8"
+  layer: "log"
+  neighbors_path: null
+  sequences_path: "/s/project/QNA/seq2space/laika_training_data/genes_centered.bed"  
+  genome_path: "/s/project/QNA/seq2space/data/GRCm38.p6.genome.fa"
+  test_fold: 3
+  val_fold: 4
+  context_length: 524288
+  shift_augs: [-3, 3]
+  rc_aug: True
+
+model:
+  cell_emb_dim: 50
+  niche_emb_dim: 0
+  num_tracks: 1
+  pretrained_model: "johahi/flashzoi-replicate-0"
+
+training:
+  batch_size: 1
+  lr: 1e-4
+  wd: 1e-6
+  clip_global_norm: 1.0
+  warmup_steps: 1000
+  num_epochs: 40
+  eval_every_n: 256
+  total_weight: 0.2

@@ -200,10 +200,10 @@ class Scooby(Borzoi):
         Returns:
             Tensor: Predicted profiles for each cell (batch_size, num_cells, seq_len, n_tracks).
         """
-        if spatial_emb is not None:
-            cell_emb = torch.cat([dissociated_emb, spatial_emb], dim=1)
+        if spatial_emb.dim == 3:
+            cell_emb = torch.cat([dissociated_emb, spatial_emb], dim=2).to(self.cell_state_to_conv[0].weight.dtype)
         else:
-            cell_emb = dissociated_emb
+            cell_emb = dissociated_emb.to(self.cell_state_to_conv[0].weight.dtype)
         cell_emb_conv_weights,cell_emb_conv_biases = self.forward_cell_embs_only(cell_emb)
         out = self.forward_sequence_w_convs(sequence, cell_emb_conv_weights, cell_emb_conv_biases, bins_to_predict = gene_slices.tolist())
         if self.count_only:
