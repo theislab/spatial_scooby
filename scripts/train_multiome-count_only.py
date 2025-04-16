@@ -86,6 +86,7 @@ def train(config):
         return_center_bins_only=True,
         disable_cache=True,
         use_transform_borzoi_emb=False,
+        count_only=True
     )
     scooby = get_lora(scooby, train=True)
     parameters = add_weight_decay(scooby, lr = lr, weight_decay = wd)
@@ -131,7 +132,8 @@ def train(config):
         get_targets= True,
         random_cells = True,
         cells_to_run = None, 
-        cell_sample_size = 1024
+        cell_sample_size = 1024,
+        gtf_file="/s/project/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz"
     )
     val_dataset =onTheFlyCountDataset(
         adata,
@@ -141,9 +143,10 @@ def train(config):
         random_cells = True,
         cell_sample_size = 1024,
         cells_to_run = None, 
+        gtf_file="/s/project/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz"
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=4, drop_last = True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
@@ -158,7 +161,7 @@ def train(config):
 
     # Training loop
     for epoch in range(num_epochs):
-        for i, [inputs, rc_augs, targets, cell_emb_idx] in tqdm.tqdm(enumerate(training_loader)):
+        for i, [inputs, rc_augs, targets, cell_emb_idx, gene_slice] in tqdm.tqdm(enumerate(training_loader)):
             inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
             # for rc_aug_idx in rc_augs.nonzero():
@@ -167,7 +170,7 @@ def train(config):
             #     targets[rc_aug_idx] = fix_rev_comp_rna(flipped_version)[0]
             optimizer.zero_grad()
             with torch.autocast("cuda"):
-                outputs = scooby(inputs, cell_emb_idx)
+                outputs = scooby(inputs, cell_emb_idx, gene_slices=torch.Tensor([3071, 3072]))
                 loss = loss_fn(outputs.squeeze(-1), targets.squeeze(-1), total_weight=total_weight)
                 accelerator.log({"loss": loss})
             accelerator.backward(loss)
