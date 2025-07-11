@@ -4,7 +4,7 @@ import torch.nn as nn
 from einops import rearrange
 from peft import get_peft_model, LoraConfig
 import torch.nn.functional as F
-
+from ..utils.utils import process_rna
 
 batch_conv = torch.vmap(F.conv1d, chunk_size = 1024)
 
@@ -93,8 +93,8 @@ class Scooby(Borzoi):
         cell_emb = rearrange(cell_emb, 'b n d -> (b n) d')
         cell_emb_conv_weights = self.cell_state_to_conv(cell_emb) # out shape (b n) ((self.embedding_dim + 1)*self.n_tracks)
         cell_emb_conv_weights = rearrange(cell_emb_conv_weights, '(b n) (l d) -> b (n l) d', b = bs, l = self.n_tracks) #positive and negative strand
-        cell_emb_conv_biases = cell_emb_conv_weights[:,:,-1:].view(bs,no_cell_embs*self.n_tracks)
-        cell_emb_conv_weights = cell_emb_conv_weights[:,:,:-1].view(bs,no_cell_embs*self.n_tracks, self.embedding_dim ,1)
+        cell_emb_conv_biases = cell_emb_conv_weights[:,:,-1:].view(bs,no_cell_embs*self.n_tracks) # bs; n_cells * n_tracks
+        cell_emb_conv_weights = cell_emb_conv_weights[:,:,:-1].view(bs,no_cell_embs*self.n_tracks, self.embedding_dim ,1) # bs; n_cells * n_tracks, emb_dim; 1
         return cell_emb_conv_weights,cell_emb_conv_biases 
 
 
@@ -187,9 +187,14 @@ class Scooby(Borzoi):
         else:
             out = batch_conv(x, cell_emb_conv_weights, cell_emb_conv_biases)
         out = F.softplus(out)
-        return out.permute(0,2,1)
+        """
+        cell_emb_conv_weights_count = torch.mean(torch.stack([cell_emb_conv_weights[:,:int(cell_emb_conv_weights.shape[-1] // 2)], [cell_emb_conv_weights[:,int(cell_emb_conv_weights.shape[-1] // 2)]:), dim=0)
+        cell_emb_conv_biases_count = torch.mean(torch.stack([cell_emb_conv_biases[:,:int(cell_emb_conv_biases.shape[1] // 2), :, :], [cell_emb_conv_biases[:,int(cell_emb_conv_biases.shape[1] // 2)]:, :, :), dim=0)
+        out_count = batch_conv(x[3071, :, :], cell_emb_conv_weights_count, cell_emb_conv_biases_count)
+        """
+        return out.permute(0,2,1) #, out_count.permute(0,2,1))
         
-    def forward(self, sequence, cell_emb, gene_slices = None):
+    def forward(self, sequence, cell_emb, gene_slices = None, strand = None):
         """
         Forward pass of the scooby model.
 
@@ -201,8 +206,15 @@ class Scooby(Borzoi):
             Tensor: Predicted profiles for each cell (batch_size, num_cells, seq_len, n_tracks).
         """
         cell_emb_conv_weights,cell_emb_conv_biases = self.forward_cell_embs_only(cell_emb)
-        out = self.forward_sequence_w_convs(sequence, cell_emb_conv_weights, cell_emb_conv_biases, bins_to_predict = gene_slices.tolist())
+        #(out_profile, out_count) = self.forward_sequence_w_convs(sequence, cell_emb_conv_weights, cell_emb_conv_biases, bins_to_predict = gene_slices.tolist())
+        
+        out_profile = self.forward_sequence_w_convs(sequence, cell_emb_conv_weights, cell_emb_conv_biases)#, bins_to_predict = gene_slices.tolist())
         if self.count_only:
             assert gene_slices is not None
-            out = torch.log1p(torch.sum(out, dim = -2))
-        return out
+            print(strand)
+            profile_processed = process_rna(out_profile, strand, clip_soft=5, num_neighbors=1)
+            print(profile_processed.shape)
+            profile_processed = profile_processed[gene_slices.tolist(), :]
+            out_count = torch.log1p(torch.sum(profile_processed, dim=0))
+        
+        return (out_count, out_profile)

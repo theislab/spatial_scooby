@@ -736,3 +736,167 @@ class onTheFlyCountDataset(Dataset):
             targets = torch.from_numpy(self.adata_count[idx_cells, gene].X.A).permute(1,0).unsqueeze(1)
             return inputs, rc_augs, targets, embeddings, gene_slices
         return inputs, rc_augs, embeddings, gene_slices
+
+
+
+
+
+
+
+
+class onTheFlyProfileCountDataset(Dataset):
+    def __init__(
+        self,
+        adata_plus,
+        adata_minus,
+        adata_count,
+        neighbors,
+        embedding,
+        ds,
+        clip_soft,
+        cell_sample_size=32,
+        get_targets=True,
+        random_cells=True,
+        cells_to_run=None,
+        cell_weights=None,
+        gtf_file=None,
+
+    ):
+        """
+    Dataset for on-the-fly generation of single-cell genomic profiles from sparse data.
+
+    This dataset processes sparse RNA and (optionally) ATAC-seq data to generate dense coverage profiles 
+    for individual cells or pseudobulk aggregates of cells. It utilizes cell embeddings to guide the selection 
+    of cells and their neighbors.
+
+    Attributes:
+        adata_plus (anndata.AnnData): AnnData object containing RNA expression data for the plus strand.
+        adata_minus (anndata.AnnData): AnnData object containing RNA expression data for the minus strand.
+        neighbors (scipy.sparse.csr_matrix): Sparse matrix representing cell neighborhood relationships.
+        embedding (pd.DataFrame): DataFrame containing cell embeddings.
+        ds (GenomeIntervalDataset): Dataset providing genomic intervals and sequences.
+        clip_soft (float): Soft clipping value for RNA coverage normalization.
+        cell_sample_size (int, optional): Number of cells to sample per sequence. Defaults to 32.
+        get_targets (bool, optional): Whether to generate target profiles. Defaults to True.
+        random_cells (bool, optional): Whether to randomly sample cells. Defaults to True.
+        cells_to_run (np.ndarray, optional): Array of cell indices to use (if not random). Defaults to None.
+        cell_weights (np.ndarray, optional): Weights for cell sampling. Defaults to None.
+        chrom_sizes (dict): Dictionary mapping chromosome names to their sizes and offsets.
+    """
+        self.clip_soft = clip_soft
+        self.neighbors = neighbors
+        self.cell_weights = cell_weights
+        self.cells_to_run = cells_to_run
+        self.embedding = embedding
+        self.get_targets = get_targets
+        self.random_cells = random_cells
+        if not self.random_cells and not cells_to_run:
+            # we are probably just providing seqs?
+            self.cells_to_run = np.zeros(1, dtype=np.int64)
+        self.genome_ds = ds
+        self.cell_sample_size = cell_sample_size
+        self.adata_plus = adata_plus
+        self.adata_minus = adata_minus
+        try:
+            self.chrom_sizes = adata_plus.uns["reference_sequences"].copy()
+            self.chrom_sizes["offset"] = np.insert(self.chrom_sizes["reference_seq_length"].cumsum()[:-1].values, 0, 0)
+            self.chrom_sizes = self.chrom_sizes.set_index("reference_seq_name").to_dict("index")
+        except:
+            pass
+        self.adata_count = adata_count
+        self.transcriptome = Transcriptome(gtf_file)
+
+    def __len__(self):
+        return len(self.genome_ds)
+
+    def _get_neighbors_for_cell(self, bar_code_id):
+        cell_neighbor_ids = self.neighbors[bar_code_id].nonzero()[1]
+        neighbors_to_load = cell_neighbor_ids.tolist() + [bar_code_id]
+        return neighbors_to_load
+
+    def _process_cells(self, adata, cells, seq_coord, strand):
+        """
+        Processes RNA expression data for the given cells and sequence coordinates.
+
+        This function extracts RNA expression counts from the AnnData object, converts them to dense coverage
+        vectors, applies normalization, and returns the processed profiles.
+
+        Args:
+            adata (anndata.AnnData): AnnData object containing RNA expression data.
+            cells (list): List of cell indices.
+            seq_coord (tuple): Tuple containing genomic coordinates and sequence information.
+            strand (str): Strand of the gene ('plus' or 'minus').
+
+        Returns:
+            torch.Tensor: Processed RNA expression profiles for the given cells.
+        """
+        m = adata.obsm["fragment_single"][cells]
+        tensor = _sparse_to_coverage_rna(m=m, seq_coord=seq_coord, strand=strand)
+        seq_cov = torch.nn.functional.avg_pool1d(tensor, kernel_size=32, stride=32) * 32
+        seq_cov = -1 + (1 + seq_cov) ** 0.75
+
+        clip_soft = self.clip_soft
+        clip = 768
+
+        clip_mask = seq_cov > clip_soft
+        seq_cov[clip_mask] = clip_soft - 1 + torch.sqrt(seq_cov[clip_mask] - clip_soft + 1)
+        seq_cov = torch.clip(seq_cov, -clip, clip)
+
+        return seq_cov
+
+    def _load_pseudobulk(self, neighbors, seq_coord):
+        """
+        Loads and processes pseudobulk RNA expression profiles for the given cells.
+
+        Args:
+            neighbors (list): List of cell indices.
+            seq_coord (tuple): Tuple containing genomic coordinates and sequence information.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Processed pseudobulk RNA expression profiles for the plus and minus strands.
+        """
+        seq_cov_plus = self._process_cells(self.adata_plus, neighbors, seq_coord, strand="plus")
+        seq_cov_minus = self._process_cells(self.adata_minus, neighbors, seq_coord, strand="minus")
+        return seq_cov_plus, seq_cov_minus  #
+
+    def _reinit_fasta_reader(self):
+        # we seem to need this as pyfaidx and torch multiprocessing are not friends
+        self.genome_ds.fasta = FastaInterval(
+            fasta_file=self.genome_ds.fasta.seqs.filename,
+            context_length=self.genome_ds.fasta.context_length,
+            return_seq_indices=self.genome_ds.fasta.return_seq_indices,
+            shift_augs=self.genome_ds.fasta.shift_augs,
+            rc_aug=self.genome_ds.fasta.rc_aug,
+        )
+
+    def __getitem__(self, idx):
+        self._reinit_fasta_reader()
+        if self.random_cells:
+            idx_cells = np.random.choice(self.neighbors.shape[0], size=self.cell_sample_size, p=self.cell_weights)
+        else:
+            idx_cells = self.cells_to_run
+        idx_gene = idx
+        seq_coord = self.genome_ds.df[idx_gene]
+        inputs, _, rc_augs = self.genome_ds[idx_gene]
+        embeddings = torch.from_numpy(np.vstack(self.embedding.iloc[idx_cells]["embedding"].values))
+        if self.get_targets:
+            chrom_size = self.chrom_sizes[seq_coord["column_1"].item()]
+            chrom_start = chrom_size["offset"]
+            chrom_end = chrom_size["reference_seq_length"]
+            seq_coord_2, seq_coord_3 = seq_coord["column_2"].item(), seq_coord["column_3"].item()
+            start = np.max([0, seq_coord_2 - 100]) + chrom_start
+            end = np.min([seq_coord_3 + 100, chrom_end]) + chrom_start
+            genome_data = [chrom_size, chrom_start, chrom_end, start, end, seq_coord_2, seq_coord_3]
+            targets = []
+
+            for cell_idx in tqdm.tqdm(idx_cells, disable=True):
+                neighbors_to_load = self._get_neighbors_for_cell(cell_idx)
+                targets.extend(self._load_pseudobulk(neighbors_to_load, genome_data))
+                
+            gene = seq_coord["column_4"].item()
+            targets_profile = torch.vstack(targets)
+            gene_slices, strand = get_gene_slice_and_strand(self.transcriptome, gene, seq_coord['column_2'].item(), span = True)
+            targets_count = torch.from_numpy(self.adata_count[idx_cells, gene].X.toarray()).permute(1,0).unsqueeze(1)
+
+            return inputs, rc_augs, targets_profile.permute(1, 0), targets_count, embeddings, gene_slices, strand
+        return inputs, rc_augs, embeddings, gene_slices

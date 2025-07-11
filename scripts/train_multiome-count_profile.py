@@ -12,8 +12,8 @@ from torch.utils.data import DataLoader
 from enformer_pytorch.data import GenomeIntervalDataset
 
 from scooby.modeling import Scooby
-from scooby.utils.utils import poisson_torch, evaluate, fix_rev_comp_rna, read_backed, add_weight_decay, get_lora
-from scooby.data import onTheFlyCountDataset
+from scooby.utils.utils import poisson_torch, evaluate, fix_rev_comp_rna, read_backed, add_weight_decay, get_lora, poisson_multinomial_torch
+from scooby.data import onTheFlyCountDataset, onTheFlyProfileCountDataset
 from borzoi_pytorch.config_borzoi import BorzoiConfig
 import scanpy as sc
 import h5py
@@ -35,6 +35,8 @@ def train(config):
     output_dir = config["output_dir"]
     run_name = config["run_name"]
     
+    rna_plus = config["data"]["rna_plus_path"]
+    rna_minus = config["data"]["rna_minus_path"]
     adata_path = config["data"]["adata_path"]
     embedding_path = config["data"]["embedding_path"]
     neighbors_path = config["data"]["neighbors_path"]
@@ -61,6 +63,10 @@ def train(config):
 
     # Load data
     adata = sc.read(adata_path)
+    adatas = {
+        "rna_plus": read_backed(h5py.File(rna_plus), "fragment_single"),
+        "rna_minus": read_backed(h5py.File(rna_minus), "fragment_single"),
+    }
 
     # we have an option to train with targets pseudobulked across neighbors, but we train without neighbors, true single cell
     neighbors = scipy.sparse.load_npz(neighbors_path)
@@ -97,7 +103,7 @@ def train(config):
     scheduler = SequentialLR(optimizer, [warmup_scheduler, train_scheduler], [warmup_steps])
 
     # Create datasets and dataloaders
-    filter_train = lambda df: df.filter((pl.col("column_6") == f"train") & (pl.col('column_2') >=0)) 
+    filter_train = lambda df: df.filter((pl.col("column_6") != f"fold{val_fold}") & (pl.col('column_2') >=0)) 
     ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -110,7 +116,7 @@ def train(config):
         chr_bed_to_fasta_map={},
     )
 
-    filter_val = lambda df: df.filter((pl.col("column_6") == f"val") & (pl.col('column_2') >=0)) 
+    filter_val = lambda df: df.filter((pl.col("column_6") == f"fold{val_fold}") & (pl.col('column_2') >=0)) 
     val_ds = GenomeIntervalDataset(
         bed_file=sequences_path,
         fasta_file=genome_path,
@@ -125,28 +131,36 @@ def train(config):
 
     accelerator.print(len(val_ds), val_fold, test_fold)
 
-    otf_dataset =onTheFlyCountDataset(
-        adata,
-        embedding,
-        ds,
+    otf_dataset =onTheFlyProfileCountDataset(
+        adata_plus=adatas['rna_plus'],
+        adata_minus=adatas['rna_minus'],
+        adata_count=adata,
+        neighbors=neighbors,
+        embedding=embedding,
+        ds=ds,
         get_targets= True,
-        random_cells = True,
-        cells_to_run = None, 
-        cell_sample_size = 1024,
-        gtf_file="/s/project/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz"
+        cell_sample_size=64,
+        cell_weights=None,
+        clip_soft=5,
+        gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
     )
-    val_dataset =onTheFlyCountDataset(
-        adata,
-        embedding,
-        val_ds,
+    val_dataset =onTheFlyProfileCountDataset(
+        adata_plus=adatas['rna_plus'],
+        adata_minus=adatas['rna_minus'],
+        adata_count=adata,
+        neighbors=neighbors,
+        embedding=embedding,
+        ds=val_ds,
         get_targets= True,
         random_cells = True,
-        cell_sample_size = 1024,
+        cell_sample_size = 32,
         cells_to_run = None, 
-        gtf_file="/s/project/QNA/scborzoi/submission_data/gencode.v32.annotation.sorted.gtf.gz"
+        cell_weights=None,
+        clip_soft=5,
+        gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=7, drop_last = True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last = True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
@@ -157,31 +171,43 @@ def train(config):
 
     # Initialize trackers
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
-    loss_fn = poisson_torch
+    loss_fn_count = poisson_torch
+    loss_fn_profile = poisson_multinomial_torch
+    weight_profile = 1.0
+    
+
+    print(len(training_loader))
 
     # Training loop
     for epoch in range(num_epochs):
-        for i, [inputs, rc_augs, targets, cell_emb_idx, gene_slice] in tqdm.tqdm(enumerate(training_loader)):
+        for i, [inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slice, strand] in tqdm.tqdm(enumerate(training_loader)):
             inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
-            # for rc_aug_idx in rc_augs.nonzero():
-            #     rc_aug_idx = rc_aug_idx[0]
-            #     flipped_version = torch.flip(targets[rc_aug_idx].unsqueeze(0), (1, -3))
-            #     targets[rc_aug_idx] = fix_rev_comp_rna(flipped_version)[0]
+            targets_profile = targets_profile.to(device, non_blocking=True)
+            targets_count = targets_count.to(device, non_blocking=True)
+            for rc_aug_idx in rc_augs.nonzero():
+                rc_aug_idx = rc_aug_idx[0]
+                flipped_version = torch.flip(targets_profile[rc_aug_idx].unsqueeze(0), (1, -3))
+                targets_profile[rc_aug_idx] = fix_rev_comp_rna(flipped_version)[0]
+                
+            #targets_profile = targets_profile[:, gene_slice, :]
             optimizer.zero_grad()
             with torch.autocast("cuda"):
-                outputs = scooby(inputs, cell_emb_idx, gene_slices=torch.Tensor([2759, 3104]))
-                loss = loss_fn(outputs.squeeze(-1), targets.squeeze(-1), total_weight=total_weight)
-                accelerator.log({"loss": loss})
+                (outputs_count, outputs_profile) = scooby(inputs, cell_emb_idx, gene_slices=gene_slice[0], strand=strand[0])
+                loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1), targets_count.squeeze().unsqueeze(-1), total_weight=total_weight)
+                loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
+                loss = 0 * loss_count + weight_profile * loss_profile
+                accelerator.log({"loss_count": loss_count,
+                                "loss_profile": loss_profile,
+                                "loss": loss,})
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(scooby.parameters(), clip_global_norm)
             accelerator.log({"learning_rate": scheduler.get_last_lr()[0]})
             optimizer.step()
             scheduler.step()
             if i % eval_every_n == 0:
-                evaluate(accelerator, scooby, val_loader, mode='count') 
+                evaluate(accelerator, scooby, val_loader, mode='count_profile') 
                 scooby.train()
-            if (i % 1000 == 0 and epoch != 0) or (i % 2000 == 0 and epoch == 0 and i != 0):
+            if (i % 10 == 0 and epoch != 0) or (i % 20 == 0 and epoch == 0 and i != 0):
                 if accelerator.is_main_process:
                     accelerator.save_state(output_dir=f"{output_dir}/scooby_epoch_{epoch}_{i}_{run_name}")
     accelerator.save_state(output_dir=f"{output_dir}/scooby_final_{run_name}")
@@ -189,7 +215,7 @@ def train(config):
 
 if __name__ == "__main__":
     # Load configuration from YAML file
-    with open("config_count.yaml", "r") as f:
+    with open("config_count_profile.yaml", "r") as f:
         config = yaml.safe_load(f)
 
     # Train the model

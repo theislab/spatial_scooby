@@ -1,0 +1,31 @@
+output_dir: "/s/project/QNA/seq2space/tmp/"
+run_name: "scooby_count"
+
+data:
+  rna_plus_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/snapatac_merged_plus.h5ad"
+  rna_minus_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/snapatac_merged_minus.h5ad"
+  adata_path: "/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/bmmc_multiome_multivi_neurips21_curated_new_palantir_fixed_GEX.h5ad"
+  embedding_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/embedding_no_val_genes_new.pq"
+  neighbors_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/no_neighbors.npz"
+  sequences_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/genes_centered.bed"
+  genome_path: "/data/nasif12/home_if12/l_minaeva/seq2space/training_data/scooby_training_data/genome_human.fa"
+  test_fold: 3
+  val_fold: 4
+  context_length: 524288
+  shift_augs: [-3, 3]
+  rc_aug: True
+
+model:
+  cell_emb_dim: 14
+  num_tracks: 2
+  pretrained_model: "johahi/borzoi-replicate-0"
+
+training:
+  batch_size: 1
+  lr: 1e-6
+  wd: 1e-6
+  clip_global_norm: 1.0
+  warmup_steps: 1000
+  num_epochs: 40
+  eval_every_n: 256
+  total_weight: 0.2

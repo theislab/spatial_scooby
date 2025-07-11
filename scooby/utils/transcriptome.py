@@ -18,6 +18,7 @@
 from intervaltree import IntervalTree
 import numpy as np
 import gzip
+import pybedtools
 
 
 class Transcriptome:

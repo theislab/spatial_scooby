@@ -230,7 +230,7 @@ def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=2):
     """
     device = accelerator.device
     csb.eval()
-    output_list, target_list, pearsons_per_track = [], [], []
+    output_count_list, output_profile_list, target_count_list, target_profile_list, pearsons_per_track = [], [], [], [], []
 
     if mode == 'multiome':
         range_val = 96
@@ -238,47 +238,65 @@ def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=2):
         range_val = 64
     elif mode == 'count':
         range_val = 32
+    elif mode == 'count_profile':
+        range_val = 32
 
     for i, x in tqdm.tqdm(enumerate(val_loader)):
+        print(len(x))
         if len(x) == 5:
             inputs, rc_augs, targets, cell_emb_idx, gene_slices = x 
             gene_slices = gene_slices[0]
+            strand = None
+        elif len(x) == 7:
+            inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slices, strand = x 
+            gene_slices = gene_slices[0]
+            strand = strand[0]
         else:
             inputs, rc_augs, targets, cell_emb_idx = x 
             gene_slices = None
+            strand = None
         if i < (stop_idx):
             continue
         if i == (stop_idx + 1):
             break
         inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
-        target_list.append(targets.to(device, non_blocking=True))
+        target_count_list.append(targets_count.to(device, non_blocking=True))
+        #target_profile_list.append(targets_profile[:, gene_slices, :].to(device, non_blocking=True))
+        target_profile_list.append(targets_profile.to(device, non_blocking=True))
         with torch.no_grad():
             with torch.autocast("cuda"):
-                output_list.append(csb(inputs, cell_emb_idx, gene_slices).detach())
+                (outputs_count, outputs_profile) = csb(inputs, cell_emb_idx, gene_slices, strand)
+                outputs_count = outputs_count.detach()
+                outputs_profile = outputs_profile.detach()
+                output_count_list.append(outputs_count)
+                output_profile_list.append(outputs_profile)
         break
-    targets = torch.vstack(target_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
-    outputs = torch.vstack(output_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
-    print (targets.shape, outputs.shape)
+    targets_count = torch.vstack(target_count_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
+    outputs_count = torch.vstack(output_count_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
+    targets_profile = torch.vstack(target_profile_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
+    outputs_profile = torch.vstack(output_profile_list).squeeze().numpy(force=True)  # [reindex].flatten(0,1).numpy(force =True)
     if mode == 'count':
         accelerator.log({"val_rnaseq_across_cells_pearson_r": np.nanmean(stats.pearsonr(outputs.flatten(), targets.flatten())[0])})
         accelerator.log({"mean_abs_count_difference": np.mean(np.abs(targets.flatten()- outputs.flatten()))})
         return
-        
 
+    if mode == "count_profile":
+        accelerator.log({"val_rnaseq_across_cells_pearson_r": np.nanmean(stats.pearsonr(outputs_count.flatten(), targets_count.flatten())[0])})
+        accelerator.log({"mean_abs_count_difference": np.mean(np.abs(targets_count.flatten()- outputs_count.flatten()))})
     # accelerator.print (outputs.shape)
     for x in range(0, range_val):
-        pearsons_per_track.append(stats.pearsonr(outputs.T[x].flatten(), targets.T[x].flatten())[0])
+        pearsons_per_track.append(stats.pearsonr(outputs_profile.T[x].flatten(), targets_profile.T[x].flatten())[0])
 
     accelerator.log({"val_rnaseq_across_tracks_pearson_r": np.nanmean(pearsons_per_track)})
-    accelerator.log({"val_pearson_r": stats.pearsonr(outputs.flatten(), targets.flatten())[0]})
+    accelerator.log({"val_pearson_r": stats.pearsonr(outputs_profile.flatten(), targets_profile.flatten())[0]})
 
     # Plot 'outputs' in the first subplot
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))  # Create a 1x2 subplot grid
-    axes[0].imshow(outputs.T, vmax=1, aspect="auto")
+    axes[0].imshow(outputs_profile.T, vmax=1, aspect="auto")
     axes[0].set_title("Outputs")  # You can add a title if desired
 
     # Plot 'targets' in the second subplot
-    axes[1].imshow(targets.T, vmax=1, aspect="auto")
+    axes[1].imshow(targets_profile.T, vmax=1, aspect="auto")
     axes[1].set_title("Targets")  # You can add a title if desired
     # plt.show()
     accelerator.log({"val_sample_viz": fig})
