@@ -171,7 +171,7 @@ def train(config):
 
     # Initialize trackers
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
-    loss_fn_count = poisson_torch
+    loss_fn_count = nn.functional.mse_loss #poisson_torch
     loss_fn_profile = poisson_multinomial_torch
     weight_profile = 1e-4
     
