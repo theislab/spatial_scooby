@@ -160,7 +160,7 @@ def train(config):
         gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last = True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
@@ -173,7 +173,7 @@ def train(config):
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
     loss_fn_count = poisson_torch
     loss_fn_profile = poisson_multinomial_torch
-    weight_profile = 1.0
+    weight_profile = 1e-4
     
 
     print(len(training_loader))
@@ -195,7 +195,7 @@ def train(config):
                 (outputs_count, outputs_profile) = scooby(inputs, cell_emb_idx, gene_slices=gene_slice[0], strand=strand[0])
                 loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1), targets_count.squeeze().unsqueeze(-1), total_weight=total_weight)
                 loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
-                loss = 0 * loss_count + weight_profile * loss_profile
+                loss = loss_count + weight_profile * loss_profile
                 accelerator.log({"loss_count": loss_count,
                                 "loss_profile": loss_profile,
                                 "loss": loss,})
@@ -207,7 +207,7 @@ def train(config):
             if i % eval_every_n == 0:
                 evaluate(accelerator, scooby, val_loader, mode='count_profile') 
                 scooby.train()
-            if (i % 10 == 0 and epoch != 0) or (i % 20 == 0 and epoch == 0 and i != 0):
+            if (i % 1000 == 0 and epoch != 0) or (i % 2000 == 0 and epoch == 0 and i != 0):
                 if accelerator.is_main_process:
                     accelerator.save_state(output_dir=f"{output_dir}/scooby_epoch_{epoch}_{i}_{run_name}")
     accelerator.save_state(output_dir=f"{output_dir}/scooby_final_{run_name}")
