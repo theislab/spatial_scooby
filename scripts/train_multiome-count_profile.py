@@ -160,8 +160,8 @@ def train(config):
         gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last = True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
     scooby = nn.SyncBatchNorm.convert_sync_batchnorm(scooby)
@@ -173,11 +173,11 @@ def train(config):
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
     loss_fn_count = nn.functional.mse_loss #poisson_torch
     loss_fn_profile = poisson_multinomial_torch
-    weight_profile = 1e-4
+    weight_profile = 1
     
 
     print(len(training_loader))
-
+    print(len(next(iter(val_loader))))
     # Training loop
     for epoch in range(num_epochs):
         for i, [inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slice, strand] in tqdm.tqdm(enumerate(training_loader)):
@@ -193,9 +193,9 @@ def train(config):
             optimizer.zero_grad()
             with torch.autocast("cuda"):
                 (outputs_count, outputs_profile) = scooby(inputs, cell_emb_idx, gene_slices=gene_slice[0], strand=strand[0])
-                loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1), targets_count.squeeze().unsqueeze(-1), total_weight=total_weight)
+                loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1).to(dtype=torch.float32), targets_count.squeeze().unsqueeze(-1).to(dtype=torch.float32)).to(torch.float32)#, total_weight=total_weight)
                 loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
-                loss = loss_count + weight_profile * loss_profile
+                loss = loss_count + weight_profile * loss_profile.to(dtype=torch.float32)
                 accelerator.log({"loss_count": loss_count,
                                 "loss_profile": loss_profile,
                                 "loss": loss,})
