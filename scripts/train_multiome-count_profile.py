@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from enformer_pytorch.data import GenomeIntervalDataset
 
 from scooby.modeling import Scooby
-from scooby.utils.utils import poisson_torch, evaluate, fix_rev_comp_rna, read_backed, add_weight_decay, get_lora, poisson_multinomial_torch
+from scooby.utils.utils import poisson_torch, evaluate, fix_rev_comp_rna, read_backed, add_weight_decay, get_lora, poisson_multinomial_torch, multinomial_torch
 from scooby.data import onTheFlyCountDataset, onTheFlyProfileCountDataset
 from borzoi_pytorch.config_borzoi import BorzoiConfig
 import scanpy as sc
@@ -42,6 +42,7 @@ def train(config):
     neighbors_path = config["data"]["neighbors_path"]
     sequences_path = config["data"]["sequences_path"]
     genome_path = config["data"]["genome_path"]
+    gtf_file = config["data"]["gtf_file"]
     
     cell_emb_dim = config["model"]["cell_emb_dim"]
     num_tracks = config["model"]["num_tracks"]
@@ -98,8 +99,8 @@ def train(config):
     parameters = add_weight_decay(scooby, lr = lr, weight_decay = wd)
     optimizer = torch.optim.AdamW(parameters)
 
-    warmup_scheduler = LinearLR(optimizer, start_factor=0.0000001, total_iters=warmup_steps, verbose=False)
-    train_scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.00, total_iters=num_steps - warmup_steps, verbose=False)
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.0000001, total_iters=warmup_steps)
+    train_scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.00, total_iters=num_steps - warmup_steps)
     scheduler = SequentialLR(optimizer, [warmup_scheduler, train_scheduler], [warmup_steps])
 
     # Create datasets and dataloaders
@@ -142,7 +143,7 @@ def train(config):
         cell_sample_size=64,
         cell_weights=None,
         clip_soft=5,
-        gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
+        gtf_file=gtf_file
     )
     val_dataset =onTheFlyProfileCountDataset(
         adata_plus=adatas['rna_plus'],
@@ -157,11 +158,11 @@ def train(config):
         cells_to_run = None, 
         cell_weights=None,
         clip_soft=5,
-        gtf_file="/data/nasif12/home_if12/l_minaeva/seq2space/reproducibility_data/gencode.v32.annotation.sorted.gtf.gz"
+        gtf_file=gtf_file
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=1, drop_last = True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
     scooby = nn.SyncBatchNorm.convert_sync_batchnorm(scooby)
@@ -171,9 +172,9 @@ def train(config):
 
     # Initialize trackers
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
-    loss_fn_count = nn.functional.mse_loss #poisson_torch
-    loss_fn_profile = poisson_multinomial_torch
-    weight_profile = 1
+    loss_fn_count = poisson_torch # nn.MSELoss() # nn.functional.mse_loss #poisson_torch
+    loss_fn_profile = multinomial_torch # poisson_multinomial_torch # multinomial_torch?
+    weight_profile = 1e-4
     
 
     print(len(training_loader))
@@ -193,7 +194,7 @@ def train(config):
             optimizer.zero_grad()
             with torch.autocast("cuda"):
                 (outputs_count, outputs_profile) = scooby(inputs, cell_emb_idx, gene_slices=gene_slice[0], strand=strand[0])
-                loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1).to(dtype=torch.float32), targets_count.squeeze().unsqueeze(-1).to(dtype=torch.float32)).to(torch.float32)#, total_weight=total_weight)
+                loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1).to(dtype=torch.float32), targets_count.squeeze().unsqueeze(-1).to(dtype=torch.float32))#, total_weight=total_weight)
                 loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
                 loss = loss_count + weight_profile * loss_profile.to(dtype=torch.float32)
                 accelerator.log({"loss_count": loss_count,

@@ -733,7 +733,7 @@ class onTheFlyCountDataset(Dataset):
         gene_slices, strand = get_gene_slice_and_strand(self.transcriptome, gene, seq_coord['column_2'].item(), span = True)
         embeddings = torch.from_numpy(np.vstack(self.embedding.iloc[idx_cells]["embedding"].values))
         if self.get_targets:
-            targets = torch.from_numpy(self.adata_count[idx_cells, gene].X.toarray()).permute(1,0).unsqueeze(1)
+            targets = torch.from_numpy(self.adata_count[idx_cells, gene].X.toarray()).permute(1,0).unsqueeze(1) # use here raw counts
             return inputs, rc_augs, targets, embeddings, gene_slices
         return inputs, rc_augs, embeddings, gene_slices
 
@@ -757,6 +757,7 @@ class onTheFlyProfileCountDataset(Dataset):
         cell_sample_size=32,
         get_targets=True,
         random_cells=True,
+        log_counts=True,
         cells_to_run=None,
         cell_weights=None,
         gtf_file=None,
@@ -789,6 +790,7 @@ class onTheFlyProfileCountDataset(Dataset):
         self.cells_to_run = cells_to_run
         self.embedding = embedding
         self.get_targets = get_targets
+        self.log_counts = log_counts
         self.random_cells = random_cells
         if not self.random_cells and not cells_to_run:
             # we are probably just providing seqs?
@@ -896,7 +898,9 @@ class onTheFlyProfileCountDataset(Dataset):
             gene = seq_coord["column_4"].item()
             targets_profile = torch.vstack(targets)
             gene_slices, strand = get_gene_slice_and_strand(self.transcriptome, gene, seq_coord['column_2'].item(), span = True)
-            targets_count = torch.from_numpy(self.adata_count[idx_cells, gene].X.toarray()).permute(1,0).unsqueeze(1)
+            targets_count = torch.from_numpy(self.adata_count[idx_cells, gene].layers['counts'].toarray()).permute(1,0).unsqueeze(1)
+            if self.log_counts:
+                targets_count = torch.log10(targets_count + 1)
 
             return inputs, rc_augs, targets_profile.permute(1, 0), targets_count, embeddings, gene_slices, strand
         return inputs, rc_augs, embeddings, gene_slices

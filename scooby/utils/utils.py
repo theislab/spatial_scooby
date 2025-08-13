@@ -214,7 +214,7 @@ def fix_rev_comp_rna(outputs_rev_comp):
     return test_out
 
 
-def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=981):
+def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=0):
     """
     Evaluates the model on the validation set.
 
