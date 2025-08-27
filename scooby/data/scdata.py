@@ -757,10 +757,13 @@ class onTheFlyProfileCountDataset(Dataset):
         cell_sample_size=32,
         get_targets=True,
         random_cells=True,
+        sample_per_cluster=False,
         log_counts=True,
         cells_to_run=None,
         cell_weights=None,
         gtf_file=None,
+        cluster_dict=None,
+        get_size_factor=False,
 
     ):
         """
@@ -783,6 +786,7 @@ class onTheFlyProfileCountDataset(Dataset):
         cells_to_run (np.ndarray, optional): Array of cell indices to use (if not random). Defaults to None.
         cell_weights (np.ndarray, optional): Weights for cell sampling. Defaults to None.
         chrom_sizes (dict): Dictionary mapping chromosome names to their sizes and offsets.
+        cluster_dict: Dictinary mapping cells to their labels (e.g. cell types, leiden clusters, etc.)
     """
         self.clip_soft = clip_soft
         self.neighbors = neighbors
@@ -790,6 +794,8 @@ class onTheFlyProfileCountDataset(Dataset):
         self.cells_to_run = cells_to_run
         self.embedding = embedding
         self.get_targets = get_targets
+        self.get_size_factor = get_size_factor
+        self.sample_per_cluster = sample_per_cluster
         self.log_counts = log_counts
         self.random_cells = random_cells
         if not self.random_cells and not cells_to_run:
@@ -799,6 +805,7 @@ class onTheFlyProfileCountDataset(Dataset):
         self.cell_sample_size = cell_sample_size
         self.adata_plus = adata_plus
         self.adata_minus = adata_minus
+        
         try:
             self.chrom_sizes = adata_plus.uns["reference_sequences"].copy()
             self.chrom_sizes["offset"] = np.insert(self.chrom_sizes["reference_seq_length"].cumsum()[:-1].values, 0, 0)
@@ -807,6 +814,7 @@ class onTheFlyProfileCountDataset(Dataset):
             pass
         self.adata_count = adata_count
         self.transcriptome = Transcriptome(gtf_file)
+        self.cluster_dict = cluster_dict
 
     def __len__(self):
         return len(self.genome_ds)
@@ -871,10 +879,21 @@ class onTheFlyProfileCountDataset(Dataset):
             rc_aug=self.genome_ds.fasta.rc_aug,
         )
 
+    def __index_sampling(self):
+        clusters_per_batch = self.cell_sample_size // len(self.cluster_dict)
+        sampled_indexes = []
+        # Sample observations for the clusters 
+        for cl in cluster_dict:
+            cl_idxs = self.cluster_dict[cl]
+            sampled_indexes.append(cl_idxs[np.random.randint(0, len(cl_idxs), clusters_per_batch)])
+        return np.concatenate(sampled_indexes)        
+
     def __getitem__(self, idx):
         self._reinit_fasta_reader()
         if self.random_cells:
             idx_cells = np.random.choice(self.neighbors.shape[0], size=self.cell_sample_size, p=self.cell_weights)
+        elif self.sample_per_cluster:
+            idx_cells = self.__index_sampling()
         else:
             idx_cells = self.cells_to_run
         idx_gene = idx
@@ -901,6 +920,9 @@ class onTheFlyProfileCountDataset(Dataset):
             targets_count = torch.from_numpy(self.adata_count[idx_cells, gene].layers['counts'].toarray()).permute(1,0).unsqueeze(1)
             if self.log_counts:
                 targets_count = torch.log10(targets_count + 1)
-
-            return inputs, rc_augs, targets_profile.permute(1, 0), targets_count, embeddings, gene_slices, strand
+            if self.get_size_factor:
+                size_factors = torch.from_numpy(self.adata_count[idx_cells].obs["size_factor_log"].to_numpy())
+                return inputs, rc_augs, targets_profile.permute(1, 0), targets_count, embeddings, gene_slices, strand, size_factors
+            else:
+                return inputs, rc_augs, targets_profile.permute(1, 0), targets_count, embeddings, gene_slices, strand, size_factors
         return inputs, rc_augs, embeddings, gene_slices

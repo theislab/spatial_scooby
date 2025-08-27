@@ -1,10 +1,10 @@
-output_dir: "/s/project/QNA/scborzoi/count_scooby/training/log10_poisson/"
-run_name: "scooby_count_poisson_counts_single_count_loss"
+output_dir: "/s/project/QNA/seq2space/tmp/"
+run_name: "scooby_count_mse_count_loss_with_batch_4_gpu"
 
 data:
   rna_plus_path: "/s/project/QNA/seq2space/training_data/scooby_training_data/snapatac_merged_plus.h5ad"
   rna_minus_path: "/s/project/QNA/seq2space/training_data/scooby_training_data/snapatac_merged_minus.h5ad"
-  adata_path: "/s/project/QNA/seq2space/reproducibility_data/bmmc_multiome_multivi_neurips21_curated_new_palantir_fixed_GEX.h5ad"
+  adata_path: "/s/project/QNA/seq2space/reproducibility_data/bmmc_multiome_multivi_neurips21_curated_new_palantir_fixed_GEX_with_log_sf.h5ad"
   embedding_path: "/s/project/QNA/seq2space/training_data/scooby_training_data/embedding_no_val_genes_new.pq"
   neighbors_path: "/s/project/QNA/seq2space/training_data/scooby_training_data/no_neighbors.npz"
   sequences_path: "/s/project/QNA/seq2space/training_data/scooby_training_data/gene_endcentered_with_fold.bed"
@@ -23,10 +23,11 @@ model:
 
 training:
   batch_size: 1
-  lr: 1e-4
+  lr: 5e-5
   wd: 1e-6
   clip_global_norm: 1.0
   warmup_steps: 1000
   num_epochs: 40
   eval_every_n: 256
   total_weight: 0.2
+  weight_profile: 1e-2

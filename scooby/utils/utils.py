@@ -242,13 +242,17 @@ def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=0):
         range_val = 32
 
     for i, x in tqdm.tqdm(enumerate(val_loader)):
-        print(len(x))
+        size_factors = None
         if len(x) == 5:
             inputs, rc_augs, targets, cell_emb_idx, gene_slices = x 
             gene_slices = gene_slices[0]
             strand = None
         elif len(x) == 7:
             inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slices, strand = x 
+            gene_slices = gene_slices[0]
+            strand = strand[0]
+        elif len(x) == 8:
+            inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slices, strand, size_factors = x 
             gene_slices = gene_slices[0]
             strand = strand[0]
         else:
@@ -267,6 +271,8 @@ def evaluate(accelerator, csb, val_loader, mode='multiome', stop_idx=0):
             with torch.autocast("cuda"):
                 (outputs_count, outputs_profile) = csb(inputs, cell_emb_idx, gene_slices, strand)
                 outputs_count = outputs_count.detach()
+                if size_factors is not None:
+                    outputs_count = outputs_count + size_factors
                 outputs_profile = outputs_profile.detach()
                 output_count_list.append(outputs_count)
                 output_profile_list.append(outputs_profile)

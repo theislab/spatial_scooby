@@ -59,6 +59,7 @@ def train(config):
     context_length = config["data"]["context_length"]
     shift_augs = config["data"]["shift_augs"]
     rc_aug = config["data"]["rc_aug"]
+    weight_profile = float(config["training"]["weight_profile"])
 
     device = accelerator.device
 
@@ -140,10 +141,11 @@ def train(config):
         embedding=embedding,
         ds=ds,
         get_targets= True,
-        cell_sample_size=64,
+        cell_sample_size=256,
         cell_weights=None,
         clip_soft=5,
-        gtf_file=gtf_file
+        gtf_file=gtf_file,
+        get_size_factor=True
     )
     val_dataset =onTheFlyProfileCountDataset(
         adata_plus=adatas['rna_plus'],
@@ -158,10 +160,11 @@ def train(config):
         cells_to_run = None, 
         cell_weights=None,
         clip_soft=5,
-        gtf_file=gtf_file
+        gtf_file=gtf_file,
+        get_size_factor=True
     )
 
-    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=8, drop_last = True)
+    training_loader = DataLoader(otf_dataset, batch_size=batch_size, shuffle=True, num_workers=16, drop_last = True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=True)
 
     # Prepare model, optimizer, scheduler, and dataloaders for distributed training
@@ -172,16 +175,14 @@ def train(config):
 
     # Initialize trackers
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
-    loss_fn_count = poisson_torch # nn.MSELoss() # nn.functional.mse_loss #poisson_torch
-    loss_fn_profile = multinomial_torch # poisson_multinomial_torch # multinomial_torch?
-    weight_profile = 1e-4
-    
+    loss_fn_count = nn.MSELoss() #poisson_torch # nn.MSELoss() # nn.functional.mse_loss #poisson_torch
+    loss_fn_profile = multinomial_torch # poisson_multinomial_torch # multinomial_torch?    
 
     print(len(training_loader))
     print(len(next(iter(val_loader))))
     # Training loop
     for epoch in range(num_epochs):
-        for i, [inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slice, strand] in tqdm.tqdm(enumerate(training_loader)):
+        for i, [inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slice, strand, size_factors] in tqdm.tqdm(enumerate(training_loader)):
             inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
             targets_profile = targets_profile.to(device, non_blocking=True)
             targets_count = targets_count.to(device, non_blocking=True)
@@ -194,6 +195,7 @@ def train(config):
             optimizer.zero_grad()
             with torch.autocast("cuda"):
                 (outputs_count, outputs_profile) = scooby(inputs, cell_emb_idx, gene_slices=gene_slice[0], strand=strand[0])
+                outputs_count += size_factors.squeeze()
                 loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1).to(dtype=torch.float32), targets_count.squeeze().unsqueeze(-1).to(dtype=torch.float32))#, total_weight=total_weight)
                 loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
                 loss = loss_count + weight_profile * loss_profile.to(dtype=torch.float32)
