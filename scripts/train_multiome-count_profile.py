@@ -176,11 +176,12 @@ def train(config):
     # Initialize trackers
     accelerator.init_trackers("scooby", init_kwargs={"wandb": {"name": f"{run_name}"}})
     loss_fn_count = nn.MSELoss() #poisson_torch # nn.MSELoss() # nn.functional.mse_loss #poisson_torch
-    loss_fn_profile = multinomial_torch # poisson_multinomial_torch # multinomial_torch?    
+    loss_fn_profile = poisson_multinomial_torch # multinomial_torch # multinomial_torch?    
 
     print(len(training_loader))
     print(len(next(iter(val_loader))))
     # Training loop
+    weight_count = 1e-4
     for epoch in range(num_epochs):
         for i, [inputs, rc_augs, targets_profile, targets_count, cell_emb_idx, gene_slice, strand, size_factors] in tqdm.tqdm(enumerate(training_loader)):
             inputs = inputs.permute(0, 2, 1).to(device, non_blocking=True)
@@ -198,15 +199,55 @@ def train(config):
                 outputs_count += size_factors.squeeze()
                 loss_count = loss_fn_count(outputs_count.squeeze().unsqueeze(-1).to(dtype=torch.float32), targets_count.squeeze().unsqueeze(-1).to(dtype=torch.float32))#, total_weight=total_weight)
                 loss_profile = loss_fn_profile(outputs_profile, targets_profile, total_weight=total_weight)
-                loss = loss_count + weight_profile * loss_profile.to(dtype=torch.float32)
+                loss = weight_count * loss_count + weight_profile * loss_profile.to(dtype=torch.float32)
                 accelerator.log({"loss_count": loss_count,
                                 "loss_profile": loss_profile,
                                 "loss": loss,})
+            # ---- Loss1 grads ----
+            optimizer.zero_grad()
+            loss_count.backward(retain_graph=True)
+    
+            grads_loss_count = {
+                name: p.grad.detach().clone()
+                for name, p in scooby.named_parameters() if p.grad is not None
+            }
+            norm_loss_count = torch.sqrt(sum(g.pow(2).sum() for g in grads_loss_count.values())).item()
+    
+            # ---- Loss2 grads ----
+            optimizer.zero_grad()
+            loss_profile.backward(retain_graph=True)
+    
+            grads_loss_profile = {
+                name: p.grad.detach().clone()
+                for name, p in scooby.named_parameters() if p.grad is not None
+            }
+            norm_loss_profile = torch.sqrt(sum(g.pow(2).sum() for g in grads_loss_profile.values())).item()
+    
+            # ---- Combined step ----
+            optimizer.zero_grad()
+    
+            # ---- Log to wandb ----
+            accelerator.log({
+                "grad_norm_loss_count": norm_loss_count,
+                "grad_norm_loss_profile": norm_loss_profile,
+            })
+
             accelerator.backward(loss)
+
+            grads_loss = {
+                name: p.grad.detach().clone()
+                for name, p in scooby.named_parameters() if p.grad is not None
+            }
+            norm_loss = torch.sqrt(sum(g.pow(2).sum() for g in grads_loss.values())).item()
+
+            accelerator.log({
+                "grad_norm_loss": norm_loss,
+            })
+            
             accelerator.clip_grad_norm_(scooby.parameters(), clip_global_norm)
             accelerator.log({"learning_rate": scheduler.get_last_lr()[0]})
             optimizer.step()
-            scheduler.step()
+            scheduler.step() 
             if i % eval_every_n == 0:
                 evaluate(accelerator, scooby, val_loader, mode='count_profile') 
                 scooby.train()

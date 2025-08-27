@@ -30,4 +30,4 @@ training:
   num_epochs: 40
   eval_every_n: 256
   total_weight: 0.2
-  weight_profile: 1e-2
+  weight_profile: 1
